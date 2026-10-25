@@ -25,7 +25,7 @@ le tout **orchestré par Dagster**, stocké sur du **stockage objet S3**, et lan
 13. [Limites connues](#13-limites-connues)
 14. [Avec plus de temps](#14-avec-plus-de-temps)
 15. [Structure du repo](#15-structure-du-repo)
-16. [Dépannage](#16-dépannage)
+
 
 ---
 
@@ -234,14 +234,11 @@ flowchart LR
 
 ### 📸 Captures
 
-**Détail du run (étapes et durées)**
-![Détail du run](docs/screenshots/03-run-detail.png)
+![Détail du run](docs/screenshots/03-run-detail (1).png)
 
-**Métadonnées de l'asset `silver_trips`**
-![Métadonnées silver](docs/screenshots/04-silver-metadata.png)
+![Métadonnées silver](docs/screenshots/03-run-detail (2).png)
 
-**Configuration d'un run dans l'UI**
-![Launchpad](docs/screenshots/05-launchpad-config.png)
+![Launchpad](docs/screenshots/03-run-detail (3).png)
 
 ---
 
@@ -264,6 +261,7 @@ Les règles sont appliquées dans l'ordre ; **le premier motif qui correspond es
 - **Asset check bloquant** `reject_ratio_below_threshold` : si `(rejetés + doublons) / total` dépasse `REJECT_RATIO_THRESHOLD` (10 % par défaut), le check échoue et **les assets Gold ne sont pas construits**. On ne publie pas d'agrégats BI sur des données dégradées.
 
 ### 📸 Capture
+
 ![Asset check](docs/screenshots/06-asset-check.png)
 
 ---
@@ -284,11 +282,6 @@ docker compose exec dagster python scripts/query_gold.py
 Les tables sont aussi consultables en SQL ad hoc : DuckDB expose les vues `daily_revenue`, `trip_duration_by_hour`,
 `top_pickup_zones` et `payment_mix_daily`.
 
-### 📸 Captures
-![Résultats SQL](docs/screenshots/07-sql-results.png)
-
-**Contenu du datalake dans MinIO**
-![Console MinIO](docs/screenshots/08-minio-console.png)
 
 ---
 
@@ -306,8 +299,6 @@ docker compose exec dagster pytest -q       # ou : make test
 La logique Spark est isolée dans `pipeline/transformations/` sous forme de fonctions `DataFrame → DataFrame`,
 indépendantes de Dagster et de S3, ce qui les rend testables unitairement.
 
-### 📸 Capture
-![Tests](docs/screenshots/09-pytest.png)
 
 ---
 
@@ -418,16 +409,3 @@ retrouve exactement les mêmes totaux.
 ```
 
 ---
-
-## 16. Dépannage
-
-| Symptôme | Cause probable | Action |
-|---|---|---|
-| `ports are not available` | port hôte déjà utilisé | changer `DAGSTER_PORT` / `MINIO_*_PORT` dans `.env` |
-| `pull access denied` / `unauthorized` sur l'image MinIO | images officielles retirées | utiliser le miroir par défaut ou définir `MINIO_IMAGE` |
-| Le conteneur `dagster` n'apparaît pas dans `docker compose ps` | échec de démarrage | `docker compose ps -a` puis `docker compose logs dagster --tail 100` |
-| `ClassNotFoundException: S3AFileSystem` | jars S3A absents | `docker compose build --no-cache` |
-| Conteneur tué (exit 137) / `OutOfMemoryError` | mémoire Docker insuffisante | augmenter la RAM de Docker, `SPARK_DRIVER_MEMORY=3g` |
-| Erreurs 429 / téléchargement lent | quota SODA | renseigner `SODA_APP_TOKEN`, réduire la période ou `MAX_ROWS_PER_DAY` |
-| Bronze affiche `[skip]` alors qu'on a changé de source | données précédentes conservées | `docker compose down -v` pour repartir de zéro, ou `force=true` |
-| `WARN WindowExec: No Partition Defined` | classement global des zones (77 lignes) | sans conséquence, volontaire |

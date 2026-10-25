@@ -234,6 +234,8 @@ flowchart LR
 
 ### 📸 Captures
 
+**DATA dans datalake**
+
 ![Détail du run](docs/screenshots/03-run-detail (1).png)
 
 ![Métadonnées silver](docs/screenshots/03-run-detail (2).png)

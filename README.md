@@ -5,7 +5,7 @@ ingestion d'une API publique, nettoyage et contrôle qualité avec **PySpark**, 
 le tout **orchestré par Dagster**, stocké sur du **stockage objet S3**, et lancé en local avec **Docker Compose**.
 
 > Test technique « équipe data » — ce document décrit ce qui a été construit, comment le lancer,
-> pourquoi chaque choix a été fait, et ce que j'améliorerais avec plus de temps.
+> pourquoi chaque choix a été fait, ce qui a été testé sur de vraies données, et ce que j'améliorerais avec plus de temps.
 
 ---
 
@@ -19,13 +19,13 @@ le tout **orchestré par Dagster**, stocké sur du **stockage objet S3**, et lan
 7. [Qualité des données](#7-qualité-des-données)
 8. [Couche d'exposition (SQL)](#8-couche-dexposition-sql)
 9. [Tests](#9-tests)
-10. [Résultats d'un run de référence](#10-résultats-dun-run-de-référence)
+10. [Résultats des runs de référence](#10-résultats-des-runs-de-référence)
 11. [Choix techniques & arbitrages](#11-choix-techniques--arbitrages)
 12. [Difficultés rencontrées](#12-difficultés-rencontrées)
 13. [Limites connues](#13-limites-connues)
 14. [Avec plus de temps](#14-avec-plus-de-temps)
 15. [Structure du repo](#15-structure-du-repo)
-
+16. [Scénario de test réel (API SODA) — preuves par couche](#16-scénario-de-test-réel-api-soda--preuves-par-couche)
 
 ---
 
@@ -101,13 +101,7 @@ docker compose down        # arrêt (données conservées dans les volumes)
 docker compose down -v     # arrêt + suppression de toutes les données
 ```
 
-### 📸 Aperçu de l'interface
-
-**Graphe des assets (lineage Bronze → Silver → Gold)**
-![Graphe des assets](docs/screenshots/01-asset-graph.png)
-
-**Run réussi dans Dagster**
-![Run réussi](docs/screenshots/02-run-success.png)
+> Les captures d'écran d'un **run réel sur l'API SODA** (une par couche et par asset) sont regroupées dans la [section 16](#16-scénario-de-test-réel-api-soda--preuves-par-couche).
 
 ---
 
@@ -232,15 +226,7 @@ flowchart LR
 - **Métadonnées** visibles dans l'UI : volumes ingérés, lignes valides/rejetées, motifs de rejet, ratio de rejet.
 - **Configuration au lancement** : période, mode source, plafond de lignes, `force`.
 
-### 📸 Captures
-
-**DATA dans datalake**
-
-![Détail du run](docs/screenshots/03-run-detail (1).png)
-
-![Métadonnées silver](docs/screenshots/03-run-detail (2).png)
-
-![Launchpad](docs/screenshots/03-run-detail (3).png)
+Les captures de chaque asset dans l'interface Dagster, après un run réel, sont en [section 16](#16-scénario-de-test-réel-api-soda--preuves-par-couche).
 
 ---
 
@@ -262,10 +248,6 @@ Les règles sont appliquées dans l'ordre ; **le premier motif qui correspond es
 - **Déduplication** : sur `trip_id`, après les règles de rejet. Les doublons supprimés sont comptés dans les métadonnées.
 - **Asset check bloquant** `reject_ratio_below_threshold` : si `(rejetés + doublons) / total` dépasse `REJECT_RATIO_THRESHOLD` (10 % par défaut), le check échoue et **les assets Gold ne sont pas construits**. On ne publie pas d'agrégats BI sur des données dégradées.
 
-### 📸 Capture
-
-![Asset check](docs/screenshots/06-asset-check.png)
-
 ---
 
 ## 8. Couche d'exposition (SQL)
@@ -284,7 +266,6 @@ docker compose exec dagster python scripts/query_gold.py
 Les tables sont aussi consultables en SQL ad hoc : DuckDB expose les vues `daily_revenue`, `trip_duration_by_hour`,
 `top_pickup_zones` et `payment_mix_daily`.
 
-
 ---
 
 ## 9. Tests
@@ -301,12 +282,14 @@ docker compose exec dagster pytest -q       # ou : make test
 La logique Spark est isolée dans `pipeline/transformations/` sous forme de fonctions `DataFrame → DataFrame`,
 indépendantes de Dagster et de S3, ce qui les rend testables unitairement.
 
-
 ---
 
-## 10. Résultats d'un run de référence
+## 10. Résultats des runs de référence
 
-Run en **mode synthétique** (14 jours × 2 020 lignes, anomalies injectées), exécuté de bout en bout dans Docker :
+Deux runs complets ont été exécutés de bout en bout dans Docker : un sur **données synthétiques** (anomalies injectées
+volontairement, pour prouver que chaque règle détecte ce qu'elle doit détecter) et un sur **données réelles** de l'API SODA.
+
+### Run synthétique (14 jours × 2 020 lignes)
 
 | Étape | Résultat |
 |---|---|
@@ -316,12 +299,21 @@ Run en **mode synthétique** (14 jours × 2 020 lignes, anomalies injectées), e
 | Gold | 4 tables construites en ≈ 3 s chacune |
 | **Run complet** | **≈ 51 s**, `RUN_SUCCESS` |
 
-Le bilan est cohérent : 26 921 + 258 + 1 101 = 28 280.
+Bilan cohérent : 26 921 + 258 + 1 101 = 28 280. Ici les anomalies sont **créées par le générateur** : 20 doublons,
+20 montants négatifs, 20 fins avant début, 20 `trip_id` vides et 20 durées nulles par jour (28 280 = 14 × (2 000 + 20 doublons)).
 
-**Idempotence** : relancer le job ne réingère rien (`[skip] … déjà présent` pour chaque jour) et le Silver
-retrouve exactement les mêmes totaux.
+### Run réel — API SODA (3 jours, plafonné à 5 000 lignes/jour)
 
-> 💡 *Ajouter ici les chiffres d'un run sur les données réelles SODA une fois exécuté.*
+| Étape | Résultat |
+|---|---|
+| Bronze | 3 jours × 5 000 lignes = **15 000** lignes (≈ 2,2 Mo par jour) — **18 s** |
+| Silver | **15 000** en entrée → **14 677** valides, **323** rejetées, **0** doublon — **2 min 22 s** |
+| Taux de rejet | ≈ **2,2 %** → check qualité **réussi** (seuil 10 %) |
+| Gold | 4 tables construites (de 5 s à 27 s chacune) |
+| **Run complet** | **≈ 3 min 35 s**, `RUN_SUCCESS` |
+
+Bilan cohérent : 14 677 + 323 = 15 000. Les 323 rejets sont de **vraies anomalies de la source** ; leur répartition par motif
+est dans les métadonnées de l'asset `silver_trips` (`reject_reasons`). Le détail et les preuves visuelles sont en [section 16](#16-scénario-de-test-réel-api-soda--preuves-par-couche).
 
 ---
 
@@ -350,7 +342,7 @@ retrouve exactement les mêmes totaux.
   (`scnd/minio-mirror`), surchargeable via `MINIO_IMAGE`. Grâce à l'usage de l'API S3 standard (S3A / boto3),
   le code est indépendant de ce choix : en production on utiliserait un S3 managé (AWS, GCS, Scaleway) ou un autre
   serveur S3 maintenu (RustFS, SeaweedFS, Garage), en changeant uniquement l'endpoint et les identifiants.
-- **Conflits de ports locaux** : les ports hôtes sont donc paramétrables via `.env` (`DAGSTER_PORT`, etc.).
+- **Conflits de ports locaux** : les ports hôtes sont paramétrables via `.env` (`DAGSTER_PORT`, etc.).
 - **Plusieurs JVM Spark en parallèle** : l'executor multiprocess par défaut de Dagster lançait une JVM par asset gold ;
   le job utilise l'executor in-process pour partager une seule session.
 - **Construction d'expressions Spark** : `F.col()` nécessite une SparkSession active ; les règles qualité sont donc
@@ -362,6 +354,7 @@ retrouve exactement les mêmes totaux.
 
 - **Spark local** : adapté à quelques centaines de milliers / quelques millions de lignes ; pas de scalabilité horizontale en l'état.
 - **Retraitement complet du Silver** à chaque run (pas d'incrémental) : acceptable pour ce volume, à remplacer par des partitions Dagster + backfills.
+- **Test réel sur un échantillon plafonné** (5 000 lignes/jour sur 3 jours) : le pipeline n'a pas été éprouvé sur une journée complète ni sur un trimestre.
 - **Miroir MinIO communautaire** : acceptable pour un environnement local, pas pour la production.
 - **Credentials en clair** dans `docker-compose.yml` (valeurs de dev par défaut).
 - **Ratio de rejet global** : un seul seuil ; pas de seuil par règle ni de détection de dérive.
@@ -407,7 +400,110 @@ retrouve exactement les mêmes totaux.
 │   ├── download_sample.py    # téléchargement local d'un échantillon
 │   └── query_gold.py         # exposition SQL (DuckDB)
 ├── tests/                    # tests unitaires (pytest)
-└── docs/screenshots/         # captures utilisées dans ce README
+└── docs/screenshots/            # captures du run réel (section 16)
 ```
 
 ---
+
+## 16. Scénario de test réel (API SODA) — preuves par couche
+
+Cette section documente un run exécuté sur les **vraies données** de l'API SODA (`SOURCE_MODE=soda`), par opposition au run
+synthétique de la section 10. Chaque couche est prouvée de deux façons : le **fichier réellement présent dans le stockage objet**
+(console MinIO) et l'**asset correspondant dans Dagster**.
+
+### 16.1 Configuration du scénario
+
+Fichier `.env` utilisé :
+```
+SOURCE_MODE=soda
+START_DATE=2023-01-01
+END_DATE=2023-01-04
+MAX_ROWS_PER_DAY=5000
+DAGSTER_PORT=3001
+```
+- **Période** : 3 jours (2023-01-01, 2023-01-02, 2023-01-03 ; `END_DATE` est exclu).
+- **Plafond de 5 000 lignes par jour** : pour tester vite et rester dans les quotas de l'API publique.
+
+Commandes exécutées :
+```bash
+docker compose down -v          # repartir de zéro : pas de données synthétiques résiduelles dans le bronze
+docker compose up -d
+docker compose exec dagster dagster job execute -m pipeline.definitions -j medallion_pipeline
+```
+
+### 16.2 Résultat du run
+
+| Asset | Résultat observé | Durée |
+|---|---|---|
+| `bronze_trips` | 3 fichiers de 5 000 lignes (≈ 2,2 Mo chacun) → **15 000 lignes** | 18,25 s |
+| `silver_trips` | 15 000 en entrée → **14 677 valides**, **323 rejetées**, **0 doublon** ; ratio de rejet ≈ 2,2 % < 10 % | 2 min 22 s |
+| `gold_daily_revenue` | table construite | 8,48 s |
+| `gold_payment_mix_daily` | table construite | 5,1 s |
+| `gold_top_pickup_zones` | table construite (jointure + fonction fenêtre) | 27,31 s |
+| `gold_trip_duration_by_hour` | table construite | 12,07 s |
+| **Run complet** | `RUN_SUCCESS` | **3 min 35 s** |
+
+Le check bloquant `reject_ratio_below_threshold` est passé : les quatre assets gold n'ont pu s'exécuter qu'à cette condition.
+Bilan : 14 677 + 323 = 15 000.
+
+### 16.3 Preuves — couche Bronze
+
+Fichiers CSV bruts, partitionnés par jour, dans le bucket `datalake` (console MinIO) :
+
+![Bronze — fichiers CSV dans MinIO](docs/screenshots/bronze%20layer%20csv%20files%20minio.png)
+
+L'asset `bronze_trips` dans Dagster :
+
+![Bronze — asset dans Dagster](docs/screenshots/bronze%20pipeline%20layer.png)
+
+### 16.4 Preuves — couche Silver
+
+Fichiers Parquet de la couche silver dans MinIO :
+
+![Silver — fichiers Parquet dans MinIO](docs/screenshots/silver%20layer%20parquet%20files%20minio.png)
+
+L'asset `silver_trips` dans Dagster :
+
+![Silver — asset dans Dagster](docs/screenshots/silver%20pipeline%20layer%20.png)
+
+### 16.5 Preuves — couche Gold
+
+Fichiers Parquet de la couche gold dans MinIO :
+
+![Gold — fichiers Parquet dans MinIO](docs/screenshots/gold%20layer%20parquet%20files%20minio.png)
+
+Les quatre assets gold dans Dagster :
+
+**`gold_daily_revenue`** — revenus par jour
+
+![Gold — daily revenue](docs/screenshots/gold%20daily%20revenue%20pipeline%20layer.png)
+
+**`gold_payment_mix_daily`** — répartition des moyens de paiement
+
+![Gold — payment mix daily](docs/screenshots/gold%20payment%20mix%20daily%20pipeline.png)
+
+**`gold_top_pickup_zones`** — top zones de prise en charge
+
+![Gold — top pickup zones](docs/screenshots/gold%20top%20pickup%20zones%20pipeline.png)
+
+**`gold_trip_duration_by_hour`** — durée des trajets par jour et par heure
+
+![Gold — trip duration by hour](docs/screenshots/gold%20trip%20duration%20by%20hour.png)
+
+### 16.6 Synthétique vs réel
+
+| | Run synthétique | Run réel (SODA) |
+|---|---|---|
+| Lignes en entrée | 28 280 | 15 000 |
+| Valides | 26 921 | 14 677 |
+| Rejetées | 1 101 | 323 |
+| Doublons supprimés | 258 | 0 |
+| Taux d'anomalies | ≈ 4,8 % | ≈ 2,2 % |
+| Origine des anomalies | injectées par le générateur | présentes dans la source |
+
+### 16.7 Lecture critique du test
+
+- **`doublons=0` sur la donnée réelle** : `trip_id` est unique à la source sur cet échantillon. La déduplication reste utile : elle a supprimé 258 doublons sur le run synthétique et elle est couverte par des tests unitaires.
+- **Les 323 rejets sont de vraies anomalies de la source.** Leur répartition par motif (`reject_reasons`) est lisible dans les métadonnées de l'asset `silver_trips` ; les lignes elles-mêmes sont conservées dans `silver/trips_rejected/`.
+- **C'est un échantillon**, pas des journées complètes : le plafond de 5 000 lignes par jour, avec un tri sur `trip_id` (un hash, donc un échantillon à peu près aléatoire), signifie que les montants du gold ne sont **pas** les totaux réels de Chicago. Sans plafond (`MAX_ROWS_PER_DAY=0`), le pipeline traite la journée complète.
+- **Les durées sont indicatives** : mesurées sur une machine locale (Docker Desktop), elles ne constituent pas un benchmark. Le Silver a notamment été plus lent sur le réel (2 min 22 s) que sur le synthétique (36 s) malgré moins de lignes, ce que ces logs ne permettent pas d'expliquer avec certitude.
